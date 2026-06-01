@@ -1,31 +1,19 @@
 const http = require("http");
 const { getISharesHoldings, TEST_FUND_URL } = require("./fetch-ishares");
-const { findISharesFund } = require("./find-ishares-fund");
+const { findISharesFundVerbose } = require("./find-ishares-fund");
 
 const server = http.createServer(async (req, res) => {
   // Special address: find the iShares fund number from an ISIN.
-  // Test with the known fund — should come back as 307528.
+  // Tries a few search engines and reports each. Want 307528.
   if (req.url.startsWith("/find-fund")) {
     const isin = "IE00BHZPJ890"; // the test fund
     try {
-      const r = await findISharesFund(isin);
-      if (!r.fundNumber) {
-        res.writeHead(200, { "Content-Type": "text/plain" });
-        res.end(
-          "NO MATCH - no iShares fund number found in the search results.\n\n" +
-            "ISIN              : " + isin + "\n" +
-            "iShares mentions  : " + r.isharesMentions + "\n" +
-            "Looks blocked     : " + (r.looksBlocked ? "YES" : "no") + "\n" +
-            "Page size         : " + r.bytes + " chars\n"
-        );
-        return;
-      }
+      const { fundNumber, report } = await findISharesFundVerbose(isin);
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end(
-        "SUCCESS - found the fund.\n\n" +
-          "ISIN          : " + isin + "\n" +
-          "Fund number   : " + r.fundNumber + "  (expected 307528)\n" +
-          "iShares hits  : " + r.isharesMentions + "\n"
+        "Find-fund test for " + isin + "\n" +
+          "Result: " + (fundNumber ? "FOUND " + fundNumber + " (expected 307528)" : "not found") +
+          "\n\n--- per-engine ---\n\n" + report + "\n"
       );
     } catch (err) {
       res.writeHead(500, { "Content-Type": "text/plain" });
