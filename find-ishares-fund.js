@@ -17,8 +17,8 @@
 // The iShares product-screener data feed (returns ALL funds).
 const SCREENER_URL =
   "https://www.ishares.com/uk/individual/en/product-screener/" +
-  "product-screener-v3.1.jsn?type=requestData&disclosureContentDispatcher=excludeNothing" +
-  "&dcrPath=/templatedata/config/product-screener-v3/data/en/one-ishares-gb/product-screener" +
+  "product-screener-v3.jsn" +
+  "?dcrPath=/templatedata/config/product-screener-v3/data/en/one-ishares-gb/product-screener" +
   "&siteEntryPassthrough=true";
 
 // Download the fund list and return it as parsed data.
