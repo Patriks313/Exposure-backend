@@ -1,18 +1,12 @@
 // ============================================================
 // iShares fund finder  —  Extractor step 1
 // ------------------------------------------------------------
-// Turns an ISIN (what the user gives us) into the iShares
-// internal fund number (what the download link needs).
+// Turns an ISIN into the iShares internal fund number by
+// searching the web for it and reading the number out of the
+// iShares result link (e.g. .../products/307528/...).
 //
-// How a human does it: search the web for the ISIN, click the
-// iShares result, read the number out of the page address
-// (e.g. .../products/307528/...). We do exactly that:
-//   1. search DuckDuckGo's plain HTML page for the ISIN
-//   2. find an iShares product link in the results
-//   3. read the fund number out of that link
-//
-// The number is then stored as "Provider ref" so this lookup
-// never has to run again for that fund.
+// Stored afterwards as "Provider ref" so it never runs again
+// for that fund.
 // ============================================================
 
 const HEADERS = {
@@ -22,47 +16,60 @@ const HEADERS = {
   Accept: "text/html,application/xhtml+xml",
 };
 
-// DuckDuckGo's no-JavaScript HTML results page. Free, no key.
-function searchUrl(query) {
-  return "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
+// Several search endpoints to try — different engines / forms.
+function candidates(query) {
+  const q = encodeURIComponent(query);
+  return [
+    ["ddg html (post-style host)", "https://html.duckduckgo.com/html/?q=" + q],
+    ["ddg lite", "https://lite.duckduckgo.com/lite/?q=" + q],
+    ["bing html", "https://www.bing.com/search?q=" + q],
+  ];
 }
 
-// From a blob of text, pull the first iShares product fund number.
-// iShares product links look like:  /products/307528/some-fund-name
+// From page text, pull the first iShares product fund number.
 function extractFundNumber(text) {
-  // DuckDuckGo wraps result links in redirects, but the real URL
-  // still appears in the text. Look for the iShares products path.
   const m = text.match(/ishares\.com\/[^"'\s]*\/products\/(\d{4,7})\//i);
   if (m) return m[1];
-  // Fallback: sometimes the path appears without the domain.
   const m2 = text.match(/\/products\/(\d{4,7})\/[a-z0-9-]/i);
   if (m2) return m2[1];
   return null;
 }
 
-// One call: ISIN in -> fund number out (or null).
-async function findISharesFund(isin) {
-  const query = isin + " ishares";
-  const res = await fetch(searchUrl(query), { headers: HEADERS, redirect: "follow" });
-  if (!res.ok) {
-    throw new Error("search failed: HTTP " + res.status + " " + res.statusText);
+// Try each candidate; report what happened for each.
+async function findISharesFundVerbose(isin) {
+  const query = isin + " ishares fund";
+  const lines = [];
+  let fundNumber = null;
+
+  for (const [label, url] of candidates(query)) {
+    try {
+      const res = await fetch(url, { headers: HEADERS, redirect: "follow" });
+      const text = await res.text();
+      const num = extractFundNumber(text);
+      const isharesHits = (text.match(/ishares\.com/gi) || []).length;
+      const blocked =
+        text.toLowerCase().includes("captcha") ||
+        text.toLowerCase().includes("unusual traffic");
+      if (num && !fundNumber) fundNumber = num;
+      lines.push(
+        label + "\n" +
+          "   HTTP " + res.status + " | " + text.length + " chars" +
+          " | ishares hits: " + isharesHits +
+          " | number: " + (num || "none") +
+          (blocked ? " | LOOKS BLOCKED" : "")
+      );
+    } catch (err) {
+      lines.push(label + "\n   ERROR: " + err.message);
+    }
   }
-  const text = await res.text();
 
-  const fundNumber = extractFundNumber(text);
-
-  // a little context for the test report
-  const isharesLinkCount = (text.match(/ishares\.com/gi) || []).length;
-  const looksBlocked =
-    text.toLowerCase().includes("captcha") ||
-    text.toLowerCase().includes("unusual traffic");
-
-  return {
-    fundNumber,                 // the number we need, or null
-    isharesMentions: isharesLinkCount,
-    looksBlocked,
-    bytes: text.length,
-  };
+  return { fundNumber, report: lines.join("\n\n") };
 }
 
-module.exports = { findISharesFund, extractFundNumber, searchUrl };
+// Simple version for real use later.
+async function findISharesFund(isin) {
+  const { fundNumber } = await findISharesFundVerbose(isin);
+  return { fundNumber };
+}
+
+module.exports = { findISharesFund, findISharesFundVerbose, extractFundNumber };
