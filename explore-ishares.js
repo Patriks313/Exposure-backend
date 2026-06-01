@@ -47,6 +47,24 @@ const CANDIDATES = [
       "?dcrPath=/templatedata/config/product-screener-v3/data/en/uk/product-screener" +
       "&siteEntryPassthrough=true",
   ],
+  [
+    "E: real params on the etf-investments URL (.jsn)",
+    "https://www.ishares.com/uk/individual/en/products/etf-investments.jsn" +
+      "?switchLocale=y&siteEntryPassthrough=true" +
+      "&productView=all&dataView=keyFacts&keyFacts=all&showAll=true",
+  ],
+  [
+    "F: real params on the etf-investments URL (.ajax)",
+    "https://www.ishares.com/uk/individual/en/products/etf-investments.ajax" +
+      "?switchLocale=y&siteEntryPassthrough=true" +
+      "&productView=all&dataView=keyFacts&keyFacts=all&showAll=true",
+  ],
+  [
+    "G: plain etf-investments page with real params",
+    "https://www.ishares.com/uk/individual/en/products/etf-investments" +
+      "?switchLocale=y&siteEntryPassthrough=true" +
+      "&productView=all&dataView=keyFacts&keyFacts=all&showAll=true",
+  ],
 ];
 
 // Look through whatever shape came back, count funds, and check
