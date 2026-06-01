@@ -85,6 +85,7 @@ async function tryOne(label, url) {
       " | items: " + s.count +
       " | test ISIN present: " + (s.hasTestIsin ? "YES" : "no") +
       (s.sample ? "\n   first keys: " + s.sample : "") +
+      "\n   body: " + text.slice(0, 400) +
       "\n"
     );
   } catch (err) {
