@@ -4,92 +4,65 @@
 // Turns an ISIN (what the user gives us) into the iShares
 // internal fund number (what the download link needs).
 //
-// How: iShares' own fund list — the data feed behind their
-// product screener — lists every fund, each with its ISIN and
-// its product-page path (which ends in the fund number).
-// We pull that list once, find the row whose ISIN matches, and
-// read off the number.
+// How a human does it: search the web for the ISIN, click the
+// iShares result, read the number out of the page address
+// (e.g. .../products/307528/...). We do exactly that:
+//   1. search DuckDuckGo's plain HTML page for the ISIN
+//   2. find an iShares product link in the results
+//   3. read the fund number out of that link
 //
 // The number is then stored as "Provider ref" so this lookup
 // never has to run again for that fund.
 // ============================================================
 
-// The iShares product-screener data feed (returns ALL funds).
-const SCREENER_URL =
-  "https://www.ishares.com/uk/individual/en/product-screener/" +
-  "product-screener-v3.jsn" +
-  "?dcrPath=/templatedata/config/product-screener-v3/data/en/one-ishares-gb/product-screener" +
-  "&siteEntryPassthrough=true";
+const HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+  Accept: "text/html,application/xhtml+xml",
+};
 
-// Download the fund list and return it as parsed data.
-async function fetchScreener() {
-  const res = await fetch(SCREENER_URL, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-      Accept: "application/json, text/plain, */*",
-    },
-    redirect: "follow",
-  });
-
-  if (!res.ok) {
-    throw new Error(
-      "iShares screener fetch failed: HTTP " + res.status + " " + res.statusText
-    );
-  }
-
-  const text = await res.text();
-  try {
-    return JSON.parse(text);
-  } catch (e) {
-    throw new Error(
-      "iShares screener: response was not the expected data " +
-        "(got " + text.length + " chars — likely a web page or block)"
-    );
-  }
+// DuckDuckGo's no-JavaScript HTML results page. Free, no key.
+function searchUrl(query) {
+  return "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
 }
 
-// Search the fund list for one ISIN. Returns the fund number
-// (and a few useful bits) or null if not found.
-function findByIsin(screenerData, isin) {
-  const target = String(isin).trim().toUpperCase();
-
-  // The feed is an object keyed by each fund's internal number.
-  // Each value is one fund's details, including its ISIN(s).
-  for (const key of Object.keys(screenerData)) {
-    const fund = screenerData[key];
-    if (!fund || typeof fund !== "object") continue;
-
-    // ISIN can sit under a few possible field names; gather any.
-    const isins = [];
-    const grab = (v) => {
-      if (!v) return;
-      if (typeof v === "string") isins.push(v.toUpperCase());
-      else if (v.r !== undefined) isins.push(String(v.r).toUpperCase());
-      else if (Array.isArray(v)) v.forEach(grab);
-    };
-    grab(fund.isin);
-    grab(fund.isins);
-
-    if (isins.some((x) => x === target)) {
-      return {
-        fundNumber: key,          // the iShares internal number we need
-        localExchangeTicker: fund.localExchangeTicker || "",
-        fundName: (fund.fundName && fund.fundName.r) || fund.fundName || "",
-        productPageUrl: fund.productPageUrl || "",
-      };
-    }
-  }
+// From a blob of text, pull the first iShares product fund number.
+// iShares product links look like:  /products/307528/some-fund-name
+function extractFundNumber(text) {
+  // DuckDuckGo wraps result links in redirects, but the real URL
+  // still appears in the text. Look for the iShares products path.
+  const m = text.match(/ishares\.com\/[^"'\s]*\/products\/(\d{4,7})\//i);
+  if (m) return m[1];
+  // Fallback: sometimes the path appears without the domain.
+  const m2 = text.match(/\/products\/(\d{4,7})\/[a-z0-9-]/i);
+  if (m2) return m2[1];
   return null;
 }
 
-// One call: ISIN in -> fund details out.
+// One call: ISIN in -> fund number out (or null).
 async function findISharesFund(isin) {
-  const data = await fetchScreener();
-  const count = Object.keys(data).length;
-  const hit = findByIsin(data, isin);
-  return { count, hit };
+  const query = isin + " ishares";
+  const res = await fetch(searchUrl(query), { headers: HEADERS, redirect: "follow" });
+  if (!res.ok) {
+    throw new Error("search failed: HTTP " + res.status + " " + res.statusText);
+  }
+  const text = await res.text();
+
+  const fundNumber = extractFundNumber(text);
+
+  // a little context for the test report
+  const isharesLinkCount = (text.match(/ishares\.com/gi) || []).length;
+  const looksBlocked =
+    text.toLowerCase().includes("captcha") ||
+    text.toLowerCase().includes("unusual traffic");
+
+  return {
+    fundNumber,                 // the number we need, or null
+    isharesMentions: isharesLinkCount,
+    looksBlocked,
+    bytes: text.length,
+  };
 }
 
-module.exports = { fetchScreener, findByIsin, findISharesFund, SCREENER_URL };
+module.exports = { findISharesFund, extractFundNumber, searchUrl };
