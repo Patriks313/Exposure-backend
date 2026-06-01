@@ -1,35 +1,41 @@
 const http = require("http");
 const { getISharesHoldings, TEST_FUND_URL } = require("./fetch-ishares");
-const { findISharesFundVerbose } = require("./find-ishares-fund");
+const { prepareFundLookup } = require("./find-ishares-fund");
 
 const server = http.createServer(async (req, res) => {
-  // Special address: find the iShares fund number from an ISIN.
-  // Searches by the fund NAME on iShares' real search. Want 307528.
+  // --- Extractor step 1 (semi-automated): prepare a fund lookup ---
+  // Shows the operator the iShares search link + ticker cross-check
+  // so they can read the fund number once and save it as Provider ref.
+  // Test fund: iShares MSCI USA ESG Enhanced (number should be 307528).
   if (req.url.startsWith("/find-fund")) {
-    const isin = "IE00BHZPJ890"; // the test fund
-    const name = "MSCI USA ESG Enhanced"; // its name (as a user would have)
     try {
-      const { fundNumber, report } = await findISharesFundVerbose(isin, name);
+      const info = await prepareFundLookup({
+        isin: "IE00BHZPJ890",
+        name: "MSCI USA ESG Enhanced",
+      });
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end(
-        "Find-fund test for " + isin + "\n" +
-          "Result: " + (fundNumber ? "FOUND " + fundNumber + " (expected 307528)" : "not found") +
-          "\n\n" + report + "\n"
+        "Fund lookup (operator step)\n\n" +
+          "ISIN        : " + info.isin + "\n" +
+          "Name        : " + info.name + "\n" +
+          "Tickers     : " + (info.tickers.join(", ") || "(none)") + "\n\n" +
+          "Search link :\n" + info.searchLink + "\n\n" +
+          info.instructions + "\n"
       );
     } catch (err) {
       res.writeHead(500, { "Content-Type": "text/plain" });
-      res.end("FAILED - could not run the search.\n\n" + err.message + "\n");
+      res.end("find-fund failed:\n\n" + err.message + "\n");
     }
     return;
   }
 
-  // Special address: go fetch the real iShares file and report back.
+  // --- Extractor steps 2+3 (proven): fetch + read a holdings file ---
   if (req.url === "/test-ishares") {
     try {
       const result = await getISharesHoldings(TEST_FUND_URL);
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end(
-        "SUCCESS — iShares file fetched and read.\n\n" +
+        "SUCCESS - iShares file fetched and read.\n\n" +
           "Holdings as of : " + result.asOf + "\n" +
           "Holdings read  : " + result.holdingsCount + "\n" +
           "Rows skipped   : " + result.skipped + "\n" +
@@ -38,12 +44,12 @@ const server = http.createServer(async (req, res) => {
       );
     } catch (err) {
       res.writeHead(500, { "Content-Type": "text/plain" });
-      res.end("FAILED — could not fetch/read the iShares file.\n\n" + err.message + "\n");
+      res.end("FAILED - could not fetch/read the iShares file.\n\n" + err.message + "\n");
     }
     return;
   }
 
-  // Anything else: the normal "alive" reply.
+  // --- Anything else: the normal "alive" reply ---
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("Exposure backend is alive");
 });
