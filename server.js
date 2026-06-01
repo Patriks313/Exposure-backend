@@ -1,8 +1,22 @@
 const http = require("http");
 const { getISharesHoldings, TEST_FUND_URL } = require("./fetch-ishares");
 const { findISharesFund } = require("./find-ishares-fund");
+const { exploreScreener } = require("./explore-ishares");
 
 const server = http.createServer(async (req, res) => {
+  // Diagnostic: try several screener addresses and report each.
+  if (req.url.startsWith("/explore")) {
+    try {
+      const report = await exploreScreener();
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("iShares screener explorer\n\n" + report);
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("Explorer failed:\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
   // Special address: find the iShares fund number from an ISIN.
   // Test with the known fund — should come back as 307528.
   if (req.url.startsWith("/find-fund")) {
