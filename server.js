@@ -4,16 +4,17 @@ const { findISharesFundVerbose } = require("./find-ishares-fund");
 
 const server = http.createServer(async (req, res) => {
   // Special address: find the iShares fund number from an ISIN.
-  // Tries a few search engines and reports each. Want 307528.
+  // Searches by the fund NAME on iShares' real search. Want 307528.
   if (req.url.startsWith("/find-fund")) {
     const isin = "IE00BHZPJ890"; // the test fund
+    const name = "MSCI USA ESG Enhanced"; // its name (as a user would have)
     try {
-      const { fundNumber, report } = await findISharesFundVerbose(isin);
+      const { fundNumber, report } = await findISharesFundVerbose(isin, name);
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end(
         "Find-fund test for " + isin + "\n" +
           "Result: " + (fundNumber ? "FOUND " + fundNumber + " (expected 307528)" : "not found") +
-          "\n\n--- per-engine ---\n\n" + report + "\n"
+          "\n\n" + report + "\n"
       );
     } catch (err) {
       res.writeHead(500, { "Content-Type": "text/plain" });
