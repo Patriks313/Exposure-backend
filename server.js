@@ -1,33 +1,22 @@
 const http = require("http");
 const { getISharesHoldings, TEST_FUND_URL } = require("./fetch-ishares");
 const { findISharesFund } = require("./find-ishares-fund");
-const { exploreScreener } = require("./explore-ishares");
 
 const server = http.createServer(async (req, res) => {
-  // Diagnostic: try several screener addresses and report each.
-  if (req.url.startsWith("/explore")) {
-    try {
-      const report = await exploreScreener();
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("iShares screener explorer\n\n" + report);
-    } catch (err) {
-      res.writeHead(500, { "Content-Type": "text/plain" });
-      res.end("Explorer failed:\n\n" + err.message + "\n");
-    }
-    return;
-  }
-
   // Special address: find the iShares fund number from an ISIN.
   // Test with the known fund — should come back as 307528.
   if (req.url.startsWith("/find-fund")) {
     const isin = "IE00BHZPJ890"; // the test fund
     try {
-      const { count, hit } = await findISharesFund(isin);
-      if (!hit) {
+      const r = await findISharesFund(isin);
+      if (!r.fundNumber) {
         res.writeHead(200, { "Content-Type": "text/plain" });
         res.end(
-          "NO MATCH — searched " + count + " funds, none had ISIN " + isin +
-            ".\n(The list loaded fine; the ISIN just wasn't in it — maybe a different region list.)\n"
+          "NO MATCH - no iShares fund number found in the search results.\n\n" +
+            "ISIN              : " + isin + "\n" +
+            "iShares mentions  : " + r.isharesMentions + "\n" +
+            "Looks blocked     : " + (r.looksBlocked ? "YES" : "no") + "\n" +
+            "Page size         : " + r.bytes + " chars\n"
         );
         return;
       }
@@ -35,14 +24,12 @@ const server = http.createServer(async (req, res) => {
       res.end(
         "SUCCESS - found the fund.\n\n" +
           "ISIN          : " + isin + "\n" +
-          "Fund number   : " + hit.fundNumber + "  (expected 307528)\n" +
-          "Ticker        : " + hit.localExchangeTicker + "\n" +
-          "Fund name     : " + hit.fundName + "\n" +
-          "Funds in list : " + count + "\n"
+          "Fund number   : " + r.fundNumber + "  (expected 307528)\n" +
+          "iShares hits  : " + r.isharesMentions + "\n"
       );
     } catch (err) {
       res.writeHead(500, { "Content-Type": "text/plain" });
-      res.end("FAILED - could not find the fund.\n\n" + err.message + "\n");
+      res.end("FAILED - could not run the search.\n\n" + err.message + "\n");
     }
     return;
   }
