@@ -7,8 +7,8 @@
 //   ensureTables() — creates the two shared tables if they don't
 //                    exist yet. Safe to run as many times as you
 //                    like; it never wipes anything.
-//   saveFund()     — writes one fund + its holdings (used in the
-//                    next step).
+//   saveFund()     — writes one fund + its holdings.
+//   getFund()      — reads one fund + its holdings back out.
 //
 // Two tables (the two-level shape from the handover, 4.3):
 //   fund          — one row per fund
@@ -78,4 +78,21 @@ async function saveFund(fund, holdings) {
   }
 }
 
-module.exports = { pool, ensureTables, saveFund };
+// --- Read one fund and its holdings back out -----------------
+// Returns { fund, holdings } or null if the fund isn't stored.
+async function getFund(isin) {
+  const fundRes = await pool.query(`SELECT * FROM fund WHERE fund_isin = $1`, [isin]);
+  if (fundRes.rows.length === 0) return null;
+
+  const holdRes = await pool.query(
+    `SELECT holding_name, ticker, holding_isin, weight_in_fund
+       FROM fund_holding
+      WHERE fund_isin = $1
+      ORDER BY weight_in_fund DESC`,
+    [isin]
+  );
+
+  return { fund: fundRes.rows[0], holdings: holdRes.rows };
+}
+
+module.exports = { pool, ensureTables, saveFund, getFund };
