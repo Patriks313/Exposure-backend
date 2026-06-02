@@ -70,6 +70,63 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // --- Hand out a stored fund as clean JSON (for the roll-up) ---
+  // Same data as /show-fund, but machine-readable so the frontend
+  // roll-up can read it. The Access-Control header lets a browser
+  // page (the roll-up) read this from another address. e.g.:
+  //   /fund-json?isin=IE00BHZPJ890
+  if (req.url.startsWith("/fund-json")) {
+    try {
+      const params = new URL(req.url, "http://localhost").searchParams;
+      const isin = (params.get("isin") || "").trim();
+      if (!isin) {
+        res.writeHead(400, {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        });
+        res.end(JSON.stringify({ error: "Please pass a fund ISIN" }));
+        return;
+      }
+      const data = await getFund(isin);
+      if (!data) {
+        res.writeHead(404, {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        });
+        res.end(JSON.stringify({ error: "No fund stored with ISIN " + isin }));
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      });
+      res.end(
+        JSON.stringify({
+          fund: {
+            isin: data.fund.fund_isin,
+            name: data.fund.fund_name,
+            provider: data.fund.provider,
+            providerRef: data.fund.provider_ref,
+            asOf: data.fund.as_of,
+          },
+          holdings: data.holdings.map((h) => ({
+            isin: h.holding_isin || "",
+            ticker: h.ticker || "",
+            name: h.holding_name,
+            weight: h.weight_in_fund,
+          })),
+        })
+      );
+    } catch (err) {
+      res.writeHead(500, {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   // --- Store an iShares fund: fetch + read + WRITE to the tables ---
   // Pass the fund's number + filename (from step 1), plus its ISIN
   // and name (which the file itself doesn't contain), e.g.:
