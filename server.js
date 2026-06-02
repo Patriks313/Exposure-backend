@@ -1,5 +1,5 @@
 const http = require("http");
-const { getISharesHoldings, TEST_FUND_URL } = require("./fetch-ishares");
+const { getISharesHoldings, buildISharesUrl, TEST_FUND_URL } = require("./fetch-ishares");
 const { prepareFundLookup } = require("./find-ishares-fund");
 
 const server = http.createServer(async (req, res) => {
@@ -35,6 +35,41 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("find-fund failed:\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
+  // --- Extractor steps 2+3 (general): fetch + read ANY iShares fund ---
+  // Pass the fund number + filename read off in step 1, e.g.:
+  //   /fetch-ishares?number=305412&fileName=iShares-MSCI-Japan-Screened-UCITS-ETF-USD-Acc_fund
+  if (req.url.startsWith("/fetch-ishares")) {
+    try {
+      const params = new URL(req.url, "http://localhost").searchParams;
+      const number = (params.get("number") || "").trim();
+      const fileName = (params.get("fileName") || "").trim();
+      if (!number || !fileName) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end(
+          "Please pass a fund number and filename, e.g.\n" +
+            "  /fetch-ishares?number=305412&fileName=iShares-MSCI-Japan-Screened-UCITS-ETF-USD-Acc_fund\n"
+        );
+        return;
+      }
+      const url = buildISharesUrl(number, fileName);
+      const result = await getISharesHoldings(url);
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(
+        "SUCCESS - iShares file fetched and read.\n\n" +
+          "Fund number    : " + number + "\n" +
+          "Holdings as of : " + result.asOf + "\n" +
+          "Holdings read  : " + result.holdingsCount + "\n" +
+          "Rows skipped   : " + result.skipped + "\n" +
+          "Weights sum to : " + result.totalWeight.toFixed(2) + "%\n" +
+          "First holding  : " + result.holdings[0].name + "\n"
+      );
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("FAILED - could not fetch/read the iShares file.\n\n" + err.message + "\n");
     }
     return;
   }
