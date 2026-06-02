@@ -17,12 +17,26 @@
 
 const { parseIShares } = require("./parse-ishares");
 
+// --- Build the download URL for ANY iShares fund -------------------
+// Two parts change per fund — both read off once by the operator:
+//   fundNumber : the number in the fund-page URL (the Provider ref)
+//   fileName   : the holdings-file name label
+// The rest of the address is the same for every iShares fund.
+function buildISharesUrl(fundNumber, fileName) {
+  return (
+    "https://www.ishares.com/uk/individual/en/products/" +
+    fundNumber +
+    "/fund/1535604580409.ajax?fileType=xls" +
+    "&fileName=" + fileName +
+    "&dataType=fund"
+  );
+}
+
 // --- the test fund: iShares MSCI USA ESG Enhanced (IE00BHZPJ890) ---
-const TEST_FUND_URL =
-  "https://www.ishares.com/uk/individual/en/products/307528/fund/" +
-  "1535604580409.ajax?fileType=xls" +
-  "&fileName=iShares-MSCI-USA-CTB-Enhanced-ESG-UCITS-ETF-USD-Dist_fund" +
-  "&dataType=fund";
+const TEST_FUND_URL = buildISharesUrl(
+  "307528",
+  "iShares-MSCI-USA-CTB-Enhanced-ESG-UCITS-ETF-USD-Dist_fund"
+);
 
 // Download the file at `url` and return its text.
 async function fetchISharesFile(url) {
@@ -67,7 +81,7 @@ async function getISharesHoldings(url) {
   return parseIShares(text);
 }
 
-module.exports = { fetchISharesFile, getISharesHoldings, TEST_FUND_URL };
+module.exports = { fetchISharesFile, getISharesHoldings, buildISharesUrl, TEST_FUND_URL };
 
 // --- run directly to test: node fetch-ishares.js ---
 if (require.main === module) {
