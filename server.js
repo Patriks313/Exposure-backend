@@ -1,8 +1,27 @@
 const http = require("http");
 const { getISharesHoldings, buildISharesUrl, TEST_FUND_URL } = require("./fetch-ishares");
 const { prepareFundLookup } = require("./find-ishares-fund");
+const { ensureTables } = require("./db");
 
 const server = http.createServer(async (req, res) => {
+  // --- Database check: connect to Neon and create the tables ---
+  // Visit this once to set up the two shared tables. Safe to
+  // re-run any time; it never deletes anything.
+  if (req.url === "/db-check") {
+    try {
+      await ensureTables();
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(
+        "SUCCESS - database connected and tables are ready.\n\n" +
+          "Tables: fund, fund_holding\n"
+      );
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("FAILED - could not reach the database.\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
   // --- Extractor step 1 (semi-automated): prepare a fund lookup ---
   // Shows the operator the iShares search link + ticker cross-check
   // so they can read the fund number once and save it as Provider ref.
