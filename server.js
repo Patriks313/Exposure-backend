@@ -1,7 +1,7 @@
 const http = require("http");
 const { getISharesHoldings, buildISharesUrl, TEST_FUND_URL } = require("./fetch-ishares");
 const { prepareFundLookup } = require("./find-ishares-fund");
-const { ensureTables } = require("./db");
+const { ensureTables, saveFund } = require("./db");
 
 const server = http.createServer(async (req, res) => {
   // --- Database check: connect to Neon and create the tables ---
@@ -18,6 +18,62 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("FAILED - could not reach the database.\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
+  // --- Store an iShares fund: fetch + read + WRITE to the tables ---
+  // Pass the fund's number + filename (from step 1), plus its ISIN
+  // and name (which the file itself doesn't contain), e.g.:
+  //   /store-ishares?number=307528
+  //     &fileName=iShares-MSCI-USA-CTB-Enhanced-ESG-UCITS-ETF-USD-Dist_fund
+  //     &isin=IE00BHZPJ890
+  //     &name=iShares MSCI USA ESG Enhanced UCITS ETF
+  if (req.url.startsWith("/store-ishares")) {
+    try {
+      const params = new URL(req.url, "http://localhost").searchParams;
+      const number = (params.get("number") || "").trim();
+      const fileName = (params.get("fileName") || "").trim();
+      const isin = (params.get("isin") || "").trim();
+      const name = (params.get("name") || "").trim();
+      if (!number || !fileName || !isin) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end(
+          "Please pass number, fileName and isin (name optional), e.g.\n" +
+            "  /store-ishares?number=307528" +
+            "&fileName=iShares-MSCI-USA-CTB-Enhanced-ESG-UCITS-ETF-USD-Dist_fund" +
+            "&isin=IE00BHZPJ890" +
+            "&name=iShares MSCI USA ESG Enhanced UCITS ETF\n"
+        );
+        return;
+      }
+      const url = buildISharesUrl(number, fileName);
+      const result = await getISharesHoldings(url);
+      await saveFund(
+        {
+          isin: isin,
+          name: name,
+          provider: "iShares",
+          providerRef: number,
+          fileName: fileName,
+          asOf: result.asOf,
+        },
+        result.holdings
+      );
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(
+        "SAVED to the database.\n\n" +
+          "Fund            : " + (name || "(no name)") + "\n" +
+          "Fund ISIN       : " + isin + "\n" +
+          "Fund number     : " + number + "\n" +
+          "Holdings as of  : " + result.asOf + "\n" +
+          "Holdings stored : " + result.holdingsCount + "\n" +
+          "Weights sum to  : " + result.totalWeight.toFixed(2) + "%\n" +
+          "First holding   : " + result.holdings[0].name + "\n"
+      );
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("FAILED - could not store the fund.\n\n" + err.message + "\n");
     }
     return;
   }
