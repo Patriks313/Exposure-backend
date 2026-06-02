@@ -1,7 +1,7 @@
 const http = require("http");
 const { getISharesHoldings, buildISharesUrl, TEST_FUND_URL } = require("./fetch-ishares");
 const { prepareFundLookup } = require("./find-ishares-fund");
-const { ensureTables, saveFund } = require("./db");
+const { ensureTables, saveFund, getFund } = require("./db");
 
 const server = http.createServer(async (req, res) => {
   // --- Database check: connect to Neon and create the tables ---
@@ -18,6 +18,54 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("FAILED - could not reach the database.\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
+  // --- Show a stored fund: read it back OUT of the tables ---
+  // Proof the save was real, e.g.:
+  //   /show-fund?isin=IE00BHZPJ890
+  if (req.url.startsWith("/show-fund")) {
+    try {
+      const params = new URL(req.url, "http://localhost").searchParams;
+      const isin = (params.get("isin") || "").trim();
+      if (!isin) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("Please pass a fund ISIN, e.g.\n  /show-fund?isin=IE00BHZPJ890\n");
+        return;
+      }
+      const data = await getFund(isin);
+      if (!data) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("No fund stored with ISIN " + isin + "\n");
+        return;
+      }
+      const f = data.fund;
+      let totalW = 0;
+      let lines = "";
+      data.holdings.forEach((h, i) => {
+        totalW += h.weight_in_fund || 0;
+        lines +=
+          String(i + 1).padStart(3) + ". " +
+          (h.holding_name || "").padEnd(34) +
+          (h.ticker || "").padEnd(8) +
+          (h.weight_in_fund || 0).toFixed(3) + "%\n";
+      });
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(
+        "STORED FUND (read back from the database)\n\n" +
+          "Fund            : " + (f.fund_name || "(no name)") + "\n" +
+          "Fund ISIN       : " + f.fund_isin + "\n" +
+          "Provider        : " + (f.provider || "") + "\n" +
+          "Fund number     : " + (f.provider_ref || "") + "\n" +
+          "Holdings as of  : " + (f.as_of || "") + "\n" +
+          "Holdings stored : " + data.holdings.length + "\n" +
+          "Weights sum to  : " + totalW.toFixed(2) + "%\n\n" +
+          "Holdings (top to bottom by weight):\n" + lines
+      );
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("FAILED - could not read the fund.\n\n" + err.message + "\n");
     }
     return;
   }
