@@ -3,6 +3,7 @@ const { getISharesHoldings, buildISharesUrl, TEST_FUND_URL } = require("./fetch-
 const { prepareFundLookup } = require("./find-ishares-fund");
 const { getLGHoldings, buildLGUrl } = require("./fetch-lg");
 const { getSPDRHoldings, buildSPDRUrl } = require("./fetch-spdr");
+const { parseAmundi } = require("./parse-amundi");
 const { ensureTables, saveFund, getFund, updateHoldingTicker } = require("./db");
 
 // ============================================================
@@ -65,6 +66,17 @@ async function isinToUsTickerBatch(isins) {
 }
 
 const sleep = (ms) => new Promise((s) => setTimeout(s, ms));
+
+// Read a request's raw body into a Buffer (used by the Amundi upload
+// route — Amundi has no download URL, so its .xlsx is POSTed in).
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
 
 const server = http.createServer(async (req, res) => {
   // --- Database check: connect to Neon and create the tables ---
@@ -346,6 +358,73 @@ const server = http.createServer(async (req, res) => {
           "Ticker          : " + ticker + "\n" +
           "Holdings as of  : " + result.asOf + "\n" +
           "Holdings stored : " + result.holdingsCount + "\n" +
+          "Weights sum to  : " + result.totalWeight.toFixed(2) + "%\n" +
+          "First holding   : " + result.holdings[0].name + "\n"
+      );
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("FAILED - could not store the fund.\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
+  // --- Store an Amundi fund: UPLOAD + read + WRITE to the tables ---
+  // Amundi publishes NO stable download URL — the holdings .xlsx is
+  // built inside the browser. So unlike the other providers, the file
+  // is UPLOADED: POST the .xlsx as the request body, with the ISIN
+  // (and optional name) in the query string, e.g.:
+  //   curl --data-binary @holdings.xlsx \
+  //     "<backend>/store-amundi?isin=LU1940199711&name=Amundi MSCI Europe ESG Selection UCITS ETF"
+  if (req.url.startsWith("/store-amundi")) {
+    try {
+      const params = new URL(req.url, "http://localhost").searchParams;
+      const isin = (params.get("isin") || "").trim();
+      const name = (params.get("name") || "").trim();
+      const fileName =
+        (params.get("fileName") || "").trim() || "Fund_Holdings_Amundi.xlsx";
+      if (req.method !== "POST" || !isin) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end(
+          "Amundi has no stable download URL, so its holdings .xlsx is UPLOADED.\n" +
+            "POST the .xlsx as the request body, with isin in the query string\n" +
+            "(name optional), e.g.:\n" +
+            "  curl --data-binary @holdings.xlsx \\\n" +
+            '    "<backend>/store-amundi?isin=LU1940199711' +
+            '&name=Amundi MSCI Europe ESG Selection UCITS ETF"\n'
+        );
+        return;
+      }
+      const buffer = await readBody(req);
+      // a real .xlsx is a zip — it must start with the "PK" signature.
+      if (!buffer || buffer.length < 4 || buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end(
+          "FAILED - the POST body is not a .xlsx file (missing PK zip signature).\n" +
+            "Send the file with  curl --data-binary @yourfile.xlsx ...\n"
+        );
+        return;
+      }
+      const result = parseAmundi(buffer);
+      await saveFund(
+        {
+          isin: isin,
+          name: name,
+          provider: "Amundi",
+          providerRef: isin, // Amundi has no fund-number / UUID / ticker
+          fileName: fileName,
+          asOf: result.asOf,
+        },
+        result.holdings
+      );
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(
+        "SAVED to the database.\n\n" +
+          "Fund            : " + (name || "(no name)") + "\n" +
+          "Fund ISIN       : " + isin + "\n" +
+          "Provider        : Amundi (uploaded file)\n" +
+          "Holdings as of  : " + result.asOf + "\n" +
+          "Holdings stored : " + result.holdingsCount + "\n" +
+          "Rows skipped    : " + result.skipped + "\n" +
           "Weights sum to  : " + result.totalWeight.toFixed(2) + "%\n" +
           "First holding   : " + result.holdings[0].name + "\n"
       );
