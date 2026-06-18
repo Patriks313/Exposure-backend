@@ -4,11 +4,13 @@
 // Reads the connection string from the DATABASE_URL setting on
 // Render (the password never lives in this code).
 //
-//   ensureTables() — creates the two shared tables if they don't
-//                    exist yet. Safe to run as many times as you
-//                    like; it never wipes anything.
-//   saveFund()     — writes one fund + its holdings.
-//   getFund()      — reads one fund + its holdings back out.
+//   ensureTables()        — creates the two shared tables if they
+//                           don't exist yet. Safe to run any time;
+//                           it never wipes anything.
+//   saveFund()            — writes one fund + its holdings.
+//   getFund()             — reads one fund + its holdings back out.
+//   updateHoldingTicker() — fills in the ticker on one holding
+//                           (used by the ticker bridge).
 //
 // Two tables (the two-level shape from the handover, 4.3):
 //   fund          — one row per fund
@@ -95,4 +97,16 @@ async function getFund(isin) {
   return { fund: fundRes.rows[0], holdings: holdRes.rows };
 }
 
-module.exports = { pool, ensureTables, saveFund, getFund };
+// --- Fill in the ticker on one holding (ticker bridge) -------
+// Matches a single holding by its fund + its own ISIN, then writes
+// the resolved ticker. Idempotent: running it again just rewrites
+// the same value. Leaves everything else untouched.
+async function updateHoldingTicker(fundIsin, holdingIsin, ticker) {
+  await pool.query(
+    `UPDATE fund_holding SET ticker = $3
+      WHERE fund_isin = $1 AND holding_isin = $2`,
+    [fundIsin, holdingIsin, ticker]
+  );
+}
+
+module.exports = { pool, ensureTables, saveFund, getFund, updateHoldingTicker };
