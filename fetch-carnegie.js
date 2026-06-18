@@ -45,19 +45,29 @@ async function downloadPdf(url) {
 
 // From the listing HTML, pick the holdings-bearing reports for the
 // "Carnegie Investment Fund" SICAV (the one Svenska Aktier belongs to).
+// Carnegie's filenames vary a lot across periods, e.g.
+//   "Carnegie Investment Fund - Annual Report ... 31.12.2024 ... .pdf"
+//   "Carnegie Investment Fund_20240630_Semi_Annual_Final.pdf"
+//   "AR_20251231_CARNEGIEINVESTMENTFUND_EN_DF.pdf"  (AR = annual report)
+//   "SAR_20250630_CARNEGIEINVESTMENTFUND...pdf"     (SAR = semi-annual)
+// so we normalise the filename (drop spaces/punctuation) and match on
+// the SICAV name plus an annual/semi marker, excluding non-holdings docs.
 function findReportUrls(html) {
   const all = [...html.matchAll(/href="([^"]+\.pdf)"/gi)].map((m) => m[1]);
   const seen = new Set();
   return all.filter((u) => {
     if (seen.has(u)) return false;
     seen.add(u);
-    const f = decodeURIComponent(u);
-    return (
-      /Carnegie Investment Fund/i.test(f) &&
-      /(Annual|Semi)/i.test(f) &&
-      /report/i.test(f) &&
-      !/Pre-?contractual|Prospectus|disclosure|faktablad|KIID|SFDR/i.test(f)
-    );
+    const f = decodeURIComponent(u).split("/").pop(); // filename only
+    const norm = f.toLowerCase().replace(/[^a-z0-9]/g, ""); // strip separators
+    const isThisSicav = norm.includes("carnegieinvestmentfund"); // not Wealth Mgmt
+    const isReport =
+      /annual/.test(norm) ||
+      /semi/.test(norm) ||
+      /^s?ar20\d{6}/.test(norm); // AR_/SAR_ + yyyymmdd prefix
+    const isJunk =
+      /precontractual|prospectus|disclosure|faktablad|kiid|sfdr/.test(norm);
+    return isThisSicav && isReport && !isJunk;
   });
 }
 
