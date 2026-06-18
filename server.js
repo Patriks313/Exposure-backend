@@ -3,6 +3,7 @@ const { getISharesHoldings, buildISharesUrl, TEST_FUND_URL } = require("./fetch-
 const { prepareFundLookup } = require("./find-ishares-fund");
 const { getLGHoldings, buildLGUrl } = require("./fetch-lg");
 const { getSPDRHoldings, buildSPDRUrl } = require("./fetch-spdr");
+const { getXtrackersHoldings, buildXtrackersUrl } = require("./fetch-xtrackers");
 const { parseAmundi } = require("./parse-amundi");
 const { ensureTables, saveFund, getFund, updateHoldingTicker } = require("./db");
 
@@ -358,6 +359,58 @@ const server = http.createServer(async (req, res) => {
           "Ticker          : " + ticker + "\n" +
           "Holdings as of  : " + result.asOf + "\n" +
           "Holdings stored : " + result.holdingsCount + "\n" +
+          "Weights sum to  : " + result.totalWeight.toFixed(2) + "%\n" +
+          "First holding   : " + result.holdings[0].name + "\n"
+      );
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("FAILED - could not store the fund.\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
+  // --- Store an Xtrackers / DWS fund: fetch + read + WRITE ---
+  // The easiest provider yet: no fund-number, UUID or ticker lookup.
+  // The holdings CSV lives at a stable URL built from the fund's ISIN
+  // alone. Pass the ISIN and (optional) name, e.g.:
+  //   /store-xtrackers?isin=LU0476289540
+  //     &name=Xtrackers MSCI Canada Screened UCITS ETF
+  if (req.url.startsWith("/store-xtrackers")) {
+    try {
+      const params = new URL(req.url, "http://localhost").searchParams;
+      const isin = (params.get("isin") || "").trim();
+      const name = (params.get("name") || "").trim();
+      if (!isin) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end(
+          "Please pass an isin (name optional), e.g.\n" +
+            "  /store-xtrackers?isin=LU0476289540" +
+            "&name=Xtrackers MSCI Canada Screened UCITS ETF\n"
+        );
+        return;
+      }
+      const url = buildXtrackersUrl(isin);
+      const result = await getXtrackersHoldings(url);
+      await saveFund(
+        {
+          isin: isin,
+          name: name,
+          provider: "Xtrackers",
+          providerRef: isin, // URL is built from the ISIN; no separate ref
+          fileName: "constituent-" + isin + ".csv",
+          asOf: result.asOf,
+        },
+        result.holdings
+      );
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(
+        "SAVED to the database.\n\n" +
+          "Fund            : " + (name || "(no name)") + "\n" +
+          "Fund ISIN       : " + isin + "\n" +
+          "Provider        : Xtrackers (DWS)\n" +
+          "Holdings as of  : " + result.asOf + "\n" +
+          "Holdings stored : " + result.holdingsCount + "\n" +
+          "Rows skipped    : " + result.skipped + "\n" +
           "Weights sum to  : " + result.totalWeight.toFixed(2) + "%\n" +
           "First holding   : " + result.holdings[0].name + "\n"
       );
