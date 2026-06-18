@@ -2,6 +2,7 @@ const http = require("http");
 const { getISharesHoldings, buildISharesUrl, TEST_FUND_URL } = require("./fetch-ishares");
 const { prepareFundLookup } = require("./find-ishares-fund");
 const { getLGHoldings, buildLGUrl } = require("./fetch-lg");
+const { getSPDRHoldings, buildSPDRUrl } = require("./fetch-spdr");
 const { ensureTables, saveFund, getFund, updateHoldingTicker } = require("./db");
 
 // ============================================================
@@ -288,6 +289,61 @@ const server = http.createServer(async (req, res) => {
           "Fund            : " + (name || "(no name)") + "\n" +
           "Fund ISIN       : " + isin + "\n" +
           "Documents ID    : " + documentsId + "\n" +
+          "Holdings as of  : " + result.asOf + "\n" +
+          "Holdings stored : " + result.holdingsCount + "\n" +
+          "Weights sum to  : " + result.totalWeight.toFixed(2) + "%\n" +
+          "First holding   : " + result.holdings[0].name + "\n"
+      );
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("FAILED - could not store the fund.\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
+  // --- Store a SPDR / State Street fund: fetch + read + WRITE ---
+  // SPDR needs no fund-number lookup — the holdings .xlsx lives at a
+  // stable URL built from the fund's own ticker. Pass that ticker plus
+  // the fund's ISIN and name (kept explicit, like the other stores),
+  // e.g.:
+  //   /store-spdr?ticker=sppy
+  //     &isin=IE00BH4GPZ28
+  //     &name=SPDR S&P 500 Leaders UCITS ETF
+  if (req.url.startsWith("/store-spdr")) {
+    try {
+      const params = new URL(req.url, "http://localhost").searchParams;
+      const ticker = (params.get("ticker") || "").trim();
+      const isin = (params.get("isin") || "").trim();
+      const name = (params.get("name") || "").trim();
+      if (!ticker || !isin) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end(
+          "Please pass ticker and isin (name optional), e.g.\n" +
+            "  /store-spdr?ticker=sppy" +
+            "&isin=IE00BH4GPZ28" +
+            "&name=SPDR S&P 500 Leaders UCITS ETF\n"
+        );
+        return;
+      }
+      const url = buildSPDRUrl(ticker);
+      const result = await getSPDRHoldings(url);
+      await saveFund(
+        {
+          isin: isin,
+          name: name,
+          provider: "SPDR",
+          providerRef: ticker,
+          fileName: "holdings-daily-emea-en-" + ticker.toLowerCase() + "-gy.xlsx",
+          asOf: result.asOf,
+        },
+        result.holdings
+      );
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(
+        "SAVED to the database.\n\n" +
+          "Fund            : " + (name || "(no name)") + "\n" +
+          "Fund ISIN       : " + isin + "\n" +
+          "Ticker          : " + ticker + "\n" +
           "Holdings as of  : " + result.asOf + "\n" +
           "Holdings stored : " + result.holdingsCount + "\n" +
           "Weights sum to  : " + result.totalWeight.toFixed(2) + "%\n" +
