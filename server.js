@@ -1,6 +1,7 @@
 const http = require("http");
 const { getISharesHoldings, buildISharesUrl, TEST_FUND_URL } = require("./fetch-ishares");
 const { prepareFundLookup } = require("./find-ishares-fund");
+const { getLGHoldings, buildLGUrl } = require("./fetch-lg");
 const { ensureTables, saveFund, getFund } = require("./db");
 
 const server = http.createServer(async (req, res) => {
@@ -171,6 +172,61 @@ const server = http.createServer(async (req, res) => {
           "Fund            : " + (name || "(no name)") + "\n" +
           "Fund ISIN       : " + isin + "\n" +
           "Fund number     : " + number + "\n" +
+          "Holdings as of  : " + result.asOf + "\n" +
+          "Holdings stored : " + result.holdingsCount + "\n" +
+          "Weights sum to  : " + result.totalWeight.toFixed(2) + "%\n" +
+          "First holding   : " + result.holdings[0].name + "\n"
+      );
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("FAILED - could not store the fund.\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
+  // --- Store an L&G fund: fetch + read + WRITE to the tables ---
+  // L&G needs no fund-number lookup — the holdings file has its own
+  // stable "documents-id" URL. Pass that UUID plus the fund's ISIN
+  // and name (the file metadata has them, but we keep it explicit
+  // like /store-ishares), e.g.:
+  //   /store-lg?documentsId=818cf8a4-4320-4ca9-bb43-ef756a35f43a
+  //     &isin=IE00BKLWY790
+  //     &name=L&G US ESG Paris Aligned UCITS ETF
+  if (req.url.startsWith("/store-lg")) {
+    try {
+      const params = new URL(req.url, "http://localhost").searchParams;
+      const documentsId = (params.get("documentsId") || "").trim();
+      const isin = (params.get("isin") || "").trim();
+      const name = (params.get("name") || "").trim();
+      if (!documentsId || !isin) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end(
+          "Please pass documentsId and isin (name optional), e.g.\n" +
+            "  /store-lg?documentsId=818cf8a4-4320-4ca9-bb43-ef756a35f43a" +
+            "&isin=IE00BKLWY790" +
+            "&name=L&G US ESG Paris Aligned UCITS ETF\n"
+        );
+        return;
+      }
+      const url = buildLGUrl(documentsId);
+      const result = await getLGHoldings(url);
+      await saveFund(
+        {
+          isin: isin,
+          name: name,
+          provider: "L&G",
+          providerRef: documentsId,
+          fileName: "Fundholdings.csv",
+          asOf: result.asOf,
+        },
+        result.holdings
+      );
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(
+        "SAVED to the database.\n\n" +
+          "Fund            : " + (name || "(no name)") + "\n" +
+          "Fund ISIN       : " + isin + "\n" +
+          "Documents ID    : " + documentsId + "\n" +
           "Holdings as of  : " + result.asOf + "\n" +
           "Holdings stored : " + result.holdingsCount + "\n" +
           "Weights sum to  : " + result.totalWeight.toFixed(2) + "%\n" +
