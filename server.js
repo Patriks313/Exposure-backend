@@ -2,7 +2,68 @@ const http = require("http");
 const { getISharesHoldings, buildISharesUrl, TEST_FUND_URL } = require("./fetch-ishares");
 const { prepareFundLookup } = require("./find-ishares-fund");
 const { getLGHoldings, buildLGUrl } = require("./fetch-lg");
-const { ensureTables, saveFund, getFund } = require("./db");
+const { ensureTables, saveFund, getFund, updateHoldingTicker } = require("./db");
+
+// ============================================================
+// Ticker bridge helper: ISIN -> US-listed ticker (via OpenFIGI)
+// ------------------------------------------------------------
+// Some funds (L&G) give an ISIN but no ticker; others (iShares)
+// give a ticker but no ISIN. To merge a company that sits in BOTH,
+// we resolve the ISIN-only side to the SAME ticker the iShares side
+// already carries. OpenFIGI maps ISIN -> ticker (never the reverse).
+//
+// THE GOTCHA: one ISIN returns a long ticker list across many
+// exchanges (Adobe: ADBE, ADB, ADBECHF, 4ADBE...). The US one is
+// NOT always first. So we pick the row whose exchange is the US
+// composite ("US") AND which is common-stock equity. If we can't
+// pick exactly one confidently, we leave it blank and let the
+// name-cleaner handle that holding instead (no guessing).
+// ============================================================
+const FIGI_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+
+// Resolve up to 10 ISINs in one OpenFIGI request (no-key batch limit).
+// Returns a Map: isin -> { ticker, candidates }.
+async function isinToUsTickerBatch(isins) {
+  const jobs = isins.map((isin) => ({ idType: "ID_ISIN", idValue: isin }));
+  const res = await fetch("https://api.openfigi.com/v3/mapping", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "User-Agent": FIGI_UA },
+    body: JSON.stringify(jobs),
+  });
+  if (!res.ok) {
+    throw new Error("OpenFIGI HTTP " + res.status + " " + res.statusText);
+  }
+  const data = await res.json(); // array, same order as the jobs we sent
+  const out = new Map();
+  isins.forEach((isin, i) => {
+    const entry = data[i] || {};
+    const rows = Array.isArray(entry.data) ? entry.data : [];
+    const candidates = [...new Set(rows.map((r) => r.ticker).filter(Boolean))];
+
+    // US-exchange equity rows only.
+    const usEquity = rows.filter(
+      (r) => r.exchCode === "US" && r.marketSector === "Equity"
+    );
+    // Prefer common stock if the security type tells us.
+    const common = usEquity.filter(
+      (r) =>
+        (r.securityType2 || r.securityType || "")
+          .toLowerCase()
+          .indexOf("common") !== -1
+    );
+    const pickFrom = common.length ? common : usEquity;
+    const distinct = [...new Set(pickFrom.map((r) => r.ticker).filter(Boolean))];
+
+    // Confident only if exactly one US ticker remains.
+    const ticker = distinct.length === 1 ? distinct[0] : "";
+    out.set(isin, { ticker, candidates });
+  });
+  return out;
+}
+
+const sleep = (ms) => new Promise((s) => setTimeout(s, ms));
 
 const server = http.createServer(async (req, res) => {
   // --- Database check: connect to Neon and create the tables ---
@@ -235,6 +296,96 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("FAILED - could not store the fund.\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
+  // --- Ticker bridge: fill in US tickers on a stored fund's holdings ---
+  // For every holding that has an ISIN but no ticker yet, look up its
+  // US-listed ticker via OpenFIGI and (optionally) save it. This lets a
+  // company that sits in an ISIN-only fund (L&G) merge with the same
+  // company in a ticker-only fund (iShares).
+  //
+  //   /resolve-tickers?isin=IE00BKLWY790            -> DRY RUN (shows
+  //                                                    what it would do)
+  //   /resolve-tickers?isin=IE00BKLWY790&write=1    -> save the tickers
+  //   ...&max=40                                    -> only the first 40
+  //                                                    (handy for a quick
+  //                                                    look)
+  // Idempotent and safe to re-run. OpenFIGI is rate-limited, so this
+  // throttles itself; a full fund can take a couple of minutes.
+  if (req.url.startsWith("/resolve-tickers")) {
+    try {
+      const params = new URL(req.url, "http://localhost").searchParams;
+      const isin = (params.get("isin") || "").trim();
+      const write = params.get("write") === "1";
+      const max = parseInt(params.get("max") || "0", 10); // 0 = all
+      if (!isin) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end(
+          "Please pass a fund ISIN, e.g.\n" +
+            "  /resolve-tickers?isin=IE00BKLWY790\n" +
+            "Dry run by default. Add &write=1 to save; &max=40 to limit.\n"
+        );
+        return;
+      }
+      const data = await getFund(isin);
+      if (!data) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("No fund stored with ISIN " + isin + "\n");
+        return;
+      }
+
+      // Holdings that need a ticker: have their own ISIN, ticker still blank.
+      let todo = data.holdings.filter(
+        (h) => (h.holding_isin || "").trim() && !(h.ticker || "").trim()
+      );
+      if (max > 0) todo = todo.slice(0, max);
+
+      let resolved = 0;
+      let blank = 0;
+      let lines = "";
+      const BATCH = 10;
+      for (let i = 0; i < todo.length; i += BATCH) {
+        const chunk = todo.slice(i, i + BATCH);
+        const map = await isinToUsTickerBatch(
+          chunk.map((h) => h.holding_isin.trim())
+        );
+        for (const h of chunk) {
+          const r = map.get(h.holding_isin.trim()) || { ticker: "", candidates: [] };
+          if (r.ticker) {
+            resolved++;
+            if (write) {
+              await updateHoldingTicker(isin, h.holding_isin.trim(), r.ticker);
+            }
+            lines += (h.holding_name || "").padEnd(36) + " -> " + r.ticker + "\n";
+          } else {
+            blank++;
+            lines +=
+              (h.holding_name || "").padEnd(36) +
+              " -> (blank)  candidates: " +
+              (r.candidates.join(", ") || "none") + "\n";
+          }
+        }
+        // Stay under OpenFIGI's no-key rate limit (~25 requests/minute).
+        if (i + BATCH < todo.length) await sleep(2600);
+      }
+
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(
+        (write
+          ? "RESOLVE + WRITE (tickers saved to the database)"
+          : "DRY RUN — nothing saved. Add &write=1 to save.") + "\n\n" +
+          "Fund                          : " + (data.fund.fund_name || "") +
+          " (" + isin + ")\n" +
+          "Holdings processed            : " + todo.length + "\n" +
+          "Resolved to a US ticker       : " + resolved + "\n" +
+          "Left blank (name fallback)    : " + blank + "\n\n" +
+          lines
+      );
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("resolve-tickers failed:\n\n" + err.message + "\n");
     }
     return;
   }
