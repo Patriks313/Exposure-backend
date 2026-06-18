@@ -4,6 +4,7 @@ const { prepareFundLookup } = require("./find-ishares-fund");
 const { getLGHoldings, buildLGUrl } = require("./fetch-lg");
 const { getSPDRHoldings, buildSPDRUrl } = require("./fetch-spdr");
 const { getXtrackersHoldings, buildXtrackersUrl } = require("./fetch-xtrackers");
+const { getCarnegieHoldings } = require("./fetch-carnegie");
 const { parseAmundi } = require("./parse-amundi");
 const { ensureTables, saveFund, getFund, updateHoldingTicker } = require("./db");
 
@@ -408,6 +409,70 @@ const server = http.createServer(async (req, res) => {
           "Fund            : " + (name || "(no name)") + "\n" +
           "Fund ISIN       : " + isin + "\n" +
           "Provider        : Xtrackers (DWS)\n" +
+          "Holdings as of  : " + result.asOf + "\n" +
+          "Holdings stored : " + result.holdingsCount + "\n" +
+          "Rows skipped    : " + result.skipped + "\n" +
+          "Weights sum to  : " + result.totalWeight.toFixed(2) + "%\n" +
+          "First holding   : " + result.holdings[0].name + "\n"
+      );
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("FAILED - could not store the fund.\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
+  // --- Store a Carnegie fund: AUTO-FETCH latest report + read + WRITE ---
+  // Carnegie publishes full holdings only inside its bi-annual SICAV
+  // report PDFs (no clean data file, no stable single URL). This route
+  // is FULLY AUTOMATIC: the server reads Carnegie's document page, finds
+  // the newest "Carnegie Investment Fund" report, and reads one sub-fund
+  // out of it. Pass the fund ISIN, an optional display name, and the
+  // sub-fund's section label as it appears in the report, e.g.:
+  //   /store-carnegie?isin=LU2122479103
+  //     &name=Carnegie Investment Fund - Svenska Aktier
+  //     &section=Svenska Aktier
+  // (section defaults to the part of name after the last " - ".)
+  if (req.url.startsWith("/store-carnegie")) {
+    try {
+      const params = new URL(req.url, "http://localhost").searchParams;
+      const isin = (params.get("isin") || "").trim();
+      const name = (params.get("name") || "").trim();
+      let section = (params.get("section") || "").trim();
+      if (!section && name.includes(" - ")) {
+        section = name.split(" - ").pop().trim();
+      }
+      if (!isin || !section) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end(
+          "Please pass an isin and a section (the sub-fund's name in the\n" +
+            "Carnegie report). name is optional. Example:\n" +
+            "  /store-carnegie?isin=LU2122479103" +
+            "&name=Carnegie Investment Fund - Svenska Aktier" +
+            "&section=Svenska Aktier\n"
+        );
+        return;
+      }
+      const result = await getCarnegieHoldings(section);
+      await saveFund(
+        {
+          isin: isin,
+          name: name || "Carnegie Investment Fund - " + section,
+          provider: "Carnegie",
+          providerRef: isin, // no separate provider ID; report is auto-found
+          fileName: result.fileName,
+          asOf: result.asOf,
+        },
+        result.holdings
+      );
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(
+        "SAVED to the database.\n\n" +
+          "Fund            : " + (name || "(no name)") + "\n" +
+          "Fund ISIN       : " + isin + "\n" +
+          "Sub-fund        : " + section + "\n" +
+          "Provider        : Carnegie\n" +
+          "Source file     : " + result.fileName + "\n" +
           "Holdings as of  : " + result.asOf + "\n" +
           "Holdings stored : " + result.holdingsCount + "\n" +
           "Rows skipped    : " + result.skipped + "\n" +
