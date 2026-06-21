@@ -6,7 +6,7 @@ const { getSPDRHoldings, buildSPDRUrl } = require("./fetch-spdr");
 const { getXtrackersHoldings, buildXtrackersUrl } = require("./fetch-xtrackers");
 const { getCarnegieHoldings } = require("./fetch-carnegie");
 const { parseAmundi } = require("./parse-amundi");
-const { ensureTables, saveFund, getFund, updateHoldingTicker } = require("./db");
+const { ensureTables, saveFund, getFund, updateHoldingTicker, pool } = require("./db");
 
 // ============================================================
 // Ticker bridge helper: ISIN -> US-listed ticker (via OpenFIGI)
@@ -553,114 +553,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // --- Store a MANUAL fund: user-supplied holdings (no fetch, no file) ---
-  // Some funds publish no machine-readable holdings we can fetch (e.g. the
-  // Swedish active funds). For these the USER reads the holdings off their
-  // own broker screen and supplies them by hand. We store ONLY the name and
-  // the weight (%) of each holding — never any market value. There is no
-  // value field anywhere in this path, so a portfolio's size can never be
-  // recorded or reconstructed from what we keep.
-  //
-  // POST a JSON body, with isin (and optional name / asOf) in the query:
-  //   curl -X POST -H "Content-Type: application/json" \
-  //     --data @holdings.json \
-  //     "<backend>/store-manual?isin=LU2122479103&name=Carnegie Svenska Aktier&asOf=2026-06-21"
-  // where holdings.json is:
-  //   { "holdings": [ { "name": "Investor B", "weight": 7.86 }, ... ] }
-  //
-  // Re-running replaces the fund's holdings cleanly (saveFund deletes the
-  // old rows first), so this is the normal way to refresh a manual fund.
-  if (req.url.startsWith("/store-manual")) {
-    try {
-      const params = new URL(req.url, "http://localhost").searchParams;
-      const isin = (params.get("isin") || "").trim();
-      const name = (params.get("name") || "").trim();
-      const asOf = (params.get("asOf") || "").trim();
-      if (req.method !== "POST" || !isin) {
-        res.writeHead(400, { "Content-Type": "text/plain" });
-        res.end(
-          "Manual funds are supplied by hand: POST a JSON body of name+weight\n" +
-            "pairs, with isin in the query string (name/asOf optional), e.g.:\n" +
-            '  curl -X POST -H "Content-Type: application/json" --data @holdings.json \\\n' +
-            '    "<backend>/store-manual?isin=LU2122479103&name=Carnegie Svenska Aktier&asOf=2026-06-21"\n' +
-            "  holdings.json = { \"holdings\": [ { \"name\": \"Investor B\", \"weight\": 7.86 }, ... ] }\n" +
-            "Only name and weight are stored. Market values are never accepted.\n"
-        );
-        return;
-      }
-
-      const raw = (await readBody(req)).toString("utf8");
-      let body;
-      try {
-        body = JSON.parse(raw);
-      } catch (e) {
-        res.writeHead(400, { "Content-Type": "text/plain" });
-        res.end("FAILED - the POST body is not valid JSON.\n");
-        return;
-      }
-
-      const list = Array.isArray(body) ? body : body.holdings;
-      if (!Array.isArray(list) || list.length === 0) {
-        res.writeHead(400, { "Content-Type": "text/plain" });
-        res.end(
-          'FAILED - expected a "holdings" array of { name, weight } objects.\n'
-        );
-        return;
-      }
-
-      // Keep ONLY name + weight. Any other field (e.g. a value) is ignored
-      // and never written, by design.
-      const holdings = [];
-      let skipped = 0;
-      for (const row of list) {
-        const hName = (row && row.name ? String(row.name) : "").trim();
-        const w = row ? Number(row.weight) : NaN;
-        if (!hName || !isFinite(w)) {
-          skipped++;
-          continue;
-        }
-        holdings.push({ name: hName, weight: w, isin: "", ticker: "" });
-      }
-
-      if (holdings.length === 0) {
-        res.writeHead(400, { "Content-Type": "text/plain" });
-        res.end("FAILED - no usable { name, weight } rows in the body.\n");
-        return;
-      }
-
-      const totalWeight = holdings.reduce((s, h) => s + h.weight, 0);
-
-      await saveFund(
-        {
-          isin: isin,
-          name: name,
-          provider: "Manual (user upload)",
-          providerRef: "manual",
-          fileName: "",
-          asOf: asOf,
-        },
-        holdings
-      );
-
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end(
-        "SAVED to the database.\n\n" +
-          "Fund            : " + (name || "(no name)") + "\n" +
-          "Fund ISIN       : " + isin + "\n" +
-          "Provider        : Manual (user upload)\n" +
-          "Holdings as of  : " + (asOf || "(not given)") + "\n" +
-          "Holdings stored : " + holdings.length + "\n" +
-          "Rows skipped    : " + skipped + "\n" +
-          "Weights sum to  : " + totalWeight.toFixed(2) + "%\n" +
-          "First holding   : " + holdings[0].name + "\n"
-      );
-    } catch (err) {
-      res.writeHead(500, { "Content-Type": "text/plain" });
-      res.end("FAILED - could not store the fund.\n\n" + err.message + "\n");
-    }
-    return;
-  }
-
   // --- Ticker bridge: fill in US tickers on a stored fund's holdings ---
   // For every holding that has an ISIN but no ticker yet, look up its
   // US-listed ticker via OpenFIGI and (optionally) save it. This lets a
@@ -838,6 +730,113 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("FAILED - could not fetch/read the iShares file.\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
+  // --- List every stored fund (isin + name + provider) as JSON -------
+  // No parameters. Used to read back exact stored fund ISINs so a
+  // fund-of-funds composition can link its sub-funds by the SAME key
+  // the merge uses. e.g.  /list-funds
+  if (req.url.startsWith("/list-funds")) {
+    try {
+      await ensureTables();
+      const r = await pool.query(
+        "SELECT f.fund_isin, f.fund_name, f.provider, f.provider_ref, f.as_of, " +
+        "  COUNT(h.id) AS holdings " +
+        "FROM fund f LEFT JOIN fund_holding h ON h.fund_isin = f.fund_isin " +
+        "GROUP BY f.fund_isin, f.fund_name, f.provider, f.provider_ref, f.as_of " +
+        "ORDER BY f.provider, f.fund_name"
+      );
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      });
+      res.end(JSON.stringify(r.rows, null, 2));
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("FAILED - could not list funds.\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
+  // --- Store a fund-of-funds composition (its SUB-FUNDS as holdings) ---
+  // Unlike the equity stores, the "holdings" here are other funds. Each
+  // holding carries the sub-fund's ISIN (the link the merge follows),
+  // its name, and its weight WITHIN this parent fund. No fetch URL
+  // exists for a fund-of-funds, so the rows are POSTed as JSON, with the
+  // parent's isin/name/asOf in the query string, e.g.:
+  //   curl -X POST -H "Content-Type: application/json" \
+  //     --data @cwmfs.json \
+  //     "<backend>/store-fof?isin=LU1695631959&name=CWMFS Utländska Aktier&asOf=2026-..."
+  // Body: { "holdings": [ { "isin": "...", "name": "...", "weight": 12.42 }, ... ] }
+  if (req.url.startsWith("/store-fof")) {
+    try {
+      const params = new URL(req.url, "http://localhost").searchParams;
+      const isin = (params.get("isin") || "").trim();
+      const name = (params.get("name") || "").trim();
+      const asOf = (params.get("asOf") || "").trim();
+      const provider = (params.get("provider") || "Fund-of-funds (manual)").trim();
+      if (req.method !== "POST" || !isin) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end(
+          "A fund-of-funds is stored by POSTing its sub-funds as JSON.\n" +
+            "Body: { \"holdings\": [ { \"isin\": \"...\", \"name\": \"...\", \"weight\": 12.42 }, ... ] }\n" +
+            "with isin in the query (name, asOf optional), e.g.:\n" +
+            "  curl -X POST -H \"Content-Type: application/json\" --data @cwmfs.json \\\n" +
+            '    "<backend>/store-fof?isin=LU1695631959&name=CWMFS Utländska Aktier"\n'
+        );
+        return;
+      }
+      const buffer = await readBody(req);
+      let body;
+      try {
+        body = JSON.parse((buffer || Buffer.from("")).toString("utf8"));
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("FAILED - the POST body is not valid JSON.\n");
+        return;
+      }
+      const holdings = (Array.isArray(body.holdings) ? body.holdings : [])
+        .map((h) => ({
+          isin: (h.isin || "").trim(),
+          ticker: (h.ticker || "").trim(),
+          name: (h.name || "").trim(),
+          weight: Number(h.weight) || 0,
+        }))
+        .filter((h) => h.name);
+      if (holdings.length === 0) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("FAILED - body has no usable holdings (need name + weight).\n");
+        return;
+      }
+      await saveFund(
+        {
+          isin: isin,
+          name: name,
+          provider: provider,
+          providerRef: isin,
+          fileName: "fof-manual",
+          asOf: asOf,
+        },
+        holdings
+      );
+      const total = holdings.reduce((s, h) => s + h.weight, 0);
+      const linked = holdings.filter((h) => h.isin).length;
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(
+        "SAVED to the database (fund-of-funds).\n\n" +
+          "Fund            : " + (name || "(no name)") + "\n" +
+          "Fund ISIN       : " + isin + "\n" +
+          "Provider        : " + provider + "\n" +
+          "As of           : " + (asOf || "(none)") + "\n" +
+          "Sub-funds stored: " + holdings.length + "\n" +
+          "  with an ISIN  : " + linked + "\n" +
+          "Weights sum to  : " + total.toFixed(2) + "%\n"
+      );
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("FAILED - could not store the fund-of-funds.\n\n" + err.message + "\n");
     }
     return;
   }
