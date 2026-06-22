@@ -848,13 +848,15 @@ const server = http.createServer(async (req, res) => {
   // BEFORE building a store route. e.g.:
   //   /peek?url=https://www.xact.se/en/Constituents
   //   /peek?url=https://.../holdings.csv&bytes=8000
+  //   /peek?url=https://www.xact.se/dist/site.js&find=fetch   (search the file)
   if (req.url.startsWith("/peek")) {
     try {
       const params = new URL(req.url, "http://localhost").searchParams;
       const target = (params.get("url") || "").trim();
+      const find = (params.get("find") || "").trim();
       let bytes = parseInt(params.get("bytes") || "4000", 10);
       if (!Number.isFinite(bytes)) bytes = 4000;
-      bytes = Math.min(Math.max(bytes, 100), 60000);
+      bytes = Math.min(Math.max(bytes, 100), 4000000);
       if (!/^https?:\/\//i.test(target)) {
         res.writeHead(400, { "Content-Type": "text/plain" });
         res.end(
@@ -879,6 +881,26 @@ const server = http.createServer(async (req, res) => {
       if (head2 === "PK") {
         bodyView =
           "[binary: starts with 'PK' — a zip/xlsx file, " + buf.length + " bytes]";
+      } else if (find) {
+        // Search the WHOLE file for a substring; return each hit with
+        // ~60 chars before and ~120 after. Great for finding the data
+        // URL inside a big minified JS bundle.
+        const text = buf.toString("utf8");
+        const hay = text.toLowerCase();
+        const needle = find.toLowerCase();
+        let idx = 0, hits = 0, lines = "";
+        while (hits < 80) {
+          const at = hay.indexOf(needle, idx);
+          if (at === -1) break;
+          const s = Math.max(0, at - 60);
+          const e = Math.min(text.length, at + needle.length + 120);
+          lines += "@" + at + ": " + text.slice(s, e).replace(/\s+/g, " ") + "\n";
+          idx = at + needle.length;
+          hits++;
+        }
+        bodyView = hits
+          ? "FIND '" + find + "' — " + hits + " match(es) in " + text.length + " chars:\n" + lines
+          : "FIND '" + find + "' — no matches in " + text.length + " chars.";
       } else if (/text|html|json|xml|csv|javascript|urlencoded/i.test(ctype) || ctype === "") {
         bodyView = buf.slice(0, bytes).toString("utf8");
       } else {
