@@ -841,6 +841,70 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // --- PEEK: fetch ANY url from the backend and show what comes back ---
+  // Read-only diagnostic. NEVER writes to the database. Render's network
+  // can reach provider sites the sandbox cannot, so this lets us discover
+  // a provider's real holdings-file URL and confirm the file is genuine
+  // BEFORE building a store route. e.g.:
+  //   /peek?url=https://www.xact.se/en/Constituents
+  //   /peek?url=https://.../holdings.csv&bytes=8000
+  if (req.url.startsWith("/peek")) {
+    try {
+      const params = new URL(req.url, "http://localhost").searchParams;
+      const target = (params.get("url") || "").trim();
+      let bytes = parseInt(params.get("bytes") || "4000", 10);
+      if (!Number.isFinite(bytes)) bytes = 4000;
+      bytes = Math.min(Math.max(bytes, 100), 60000);
+      if (!/^https?:\/\//i.test(target)) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end(
+          "Please pass a full http(s) url, e.g.\n" +
+            "  /peek?url=https://www.xact.se/en/Constituents\n"
+        );
+        return;
+      }
+      const r = await fetch(target, {
+        headers: {
+          "User-Agent": FIGI_UA,
+          Accept: "*/*",
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+        redirect: "follow",
+      });
+      const buf = Buffer.from(await r.arrayBuffer());
+      const ctype = r.headers.get("content-type") || "";
+      const cdisp = r.headers.get("content-disposition") || "";
+      const head2 = buf.slice(0, 2).toString("latin1");
+      let bodyView;
+      if (head2 === "PK") {
+        bodyView =
+          "[binary: starts with 'PK' — a zip/xlsx file, " + buf.length + " bytes]";
+      } else if (/text|html|json|xml|csv|javascript|urlencoded/i.test(ctype) || ctype === "") {
+        bodyView = buf.slice(0, bytes).toString("utf8");
+      } else {
+        bodyView =
+          "[binary, " + ctype + "] first 32 bytes hex: " +
+          buf.slice(0, 32).toString("hex");
+      }
+      res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end(
+        "PEEK (read-only — nothing was stored)\n\n" +
+          "Requested : " + target + "\n" +
+          "Final URL : " + r.url + "\n" +
+          "Status    : " + r.status + " " + r.statusText + "\n" +
+          "Type      : " + ctype + "\n" +
+          (cdisp ? "Filename  : " + cdisp + "\n" : "") +
+          "Bytes     : " + buf.length + "\n" +
+          "----- first " + Math.min(bytes, buf.length) + " chars -----\n" +
+          bodyView + "\n"
+      );
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("PEEK failed:\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
   // --- Anything else: the normal "alive" reply ---
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("Exposure backend is alive");
