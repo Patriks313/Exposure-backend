@@ -80,6 +80,53 @@ function readBody(req) {
   });
 }
 
+// ============================================================
+// XACT (Handelsbanken) holdings — inline fetch+parse
+// ------------------------------------------------------------
+// XACT has no data file. Its constituents page renders the
+// holdings server-side when you GET it with ?productId=<id>
+// (a simple GET form, no token). Each row is:
+//   <span class="name">NAME</span><span class="weight">W %</span>
+// Names only — no ISIN/ticker — so these merge by cleaned name.
+// We drop cash rows and the index instrument (names starting
+// "cash"/"omx"). productId comes off the dropdown on
+//   https://www.xact.se/en/Constituents
+// ============================================================
+function buildXactUrl(productId) {
+  return "https://www.xact.se/en/Constituents?productId=" + encodeURIComponent(productId);
+}
+function decodeEntities(s) {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x([0-9A-Fa-f]+);/g, (m, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (m, d) => String.fromCharCode(parseInt(d, 10)));
+}
+async function getXactHoldings(productId) {
+  const r = await fetch(buildXactUrl(productId), {
+    headers: { "User-Agent": FIGI_UA, Accept: "text/html" },
+    redirect: "follow",
+  });
+  if (!r.ok) throw new Error("XACT HTTP " + r.status + " " + r.statusText);
+  const html = await r.text();
+  const re = /<span class="name">([\s\S]*?)<\/span>\s*<span class="weight">([\d.,]+)\s*%<\/span>/g;
+  let m, holdings = [], skipped = 0;
+  while ((m = re.exec(html))) {
+    const name = decodeEntities(m[1]).replace(/\s+/g, " ").trim();
+    const weight = parseFloat(m[2].replace(",", ".")) || 0;
+    const low = name.toLowerCase();
+    if (!name || low.startsWith("cash") || low.startsWith("omx") || low.indexOf("likvid") !== -1) {
+      skipped++;
+      continue;
+    }
+    holdings.push({ isin: "", ticker: "", name: name, weight: weight });
+  }
+  const totalWeight = holdings.reduce((s, h) => s + h.weight, 0);
+  return { holdings, holdingsCount: holdings.length, skipped, totalWeight, asOf: "" };
+}
+
 const server = http.createServer(async (req, res) => {
   // --- Database check: connect to Neon and create the tables ---
   // Visit this once to set up the two shared tables. Safe to
@@ -837,6 +884,94 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("FAILED - could not store the fund-of-funds.\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
+  // --- Dry-run an XACT fund: fetch + read, but DON'T write ---
+  // Verify the numbers before storing, e.g.:
+  //   /fetch-xact?productId=5JoqRRtMNhmcKI8l1RYuRR
+  if (req.url.startsWith("/fetch-xact")) {
+    try {
+      const params = new URL(req.url, "http://localhost").searchParams;
+      const productId = (params.get("productId") || "").trim();
+      if (!productId) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end(
+          "Please pass a productId, e.g.\n" +
+            "  /fetch-xact?productId=5JoqRRtMNhmcKI8l1RYuRR\n"
+        );
+        return;
+      }
+      const result = await getXactHoldings(productId);
+      let lines = "";
+      result.holdings.forEach((h, i) => {
+        lines += String(i + 1).padStart(3) + ". " +
+          h.name.padEnd(34) + (h.weight || 0).toFixed(2) + "%\n";
+      });
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(
+        "DRY RUN - XACT fetched and read (nothing stored).\n\n" +
+          "Product ID     : " + productId + "\n" +
+          "Holdings read  : " + result.holdingsCount + "\n" +
+          "Rows skipped   : " + result.skipped + "\n" +
+          "Weights sum to : " + result.totalWeight.toFixed(2) + "%\n\n" +
+          lines
+      );
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("FAILED - could not fetch/read the XACT fund.\n\n" + err.message + "\n");
+    }
+    return;
+  }
+
+  // --- Store an XACT fund: fetch + read + WRITE to the tables ---
+  // Pass the productId (off the dropdown), plus the fund's ISIN and
+  // name (the page has neither). e.g.:
+  //   /store-xact?productId=5JoqRRtMNhmcKI8l1RYuRR
+  //     &isin=SE0000693293&name=XACT OMXS30 ESG (UCITS ETF)
+  if (req.url.startsWith("/store-xact")) {
+    try {
+      const params = new URL(req.url, "http://localhost").searchParams;
+      const productId = (params.get("productId") || "").trim();
+      const isin = (params.get("isin") || "").trim();
+      const name = (params.get("name") || "").trim();
+      if (!productId || !isin) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end(
+          "Please pass productId and isin (name optional), e.g.\n" +
+            "  /store-xact?productId=5JoqRRtMNhmcKI8l1RYuRR" +
+            "&isin=SE0000693293&name=XACT OMXS30 ESG (UCITS ETF)\n"
+        );
+        return;
+      }
+      const result = await getXactHoldings(productId);
+      await saveFund(
+        {
+          isin: isin,
+          name: name,
+          provider: "XACT",
+          providerRef: productId,
+          fileName: "xact-constituents-" + productId,
+          asOf: result.asOf,
+        },
+        result.holdings
+      );
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(
+        "SAVED to the database.\n\n" +
+          "Fund            : " + (name || "(no name)") + "\n" +
+          "Fund ISIN       : " + isin + "\n" +
+          "Product ID      : " + productId + "\n" +
+          "Provider        : XACT (Handelsbanken)\n" +
+          "Holdings stored : " + result.holdingsCount + "\n" +
+          "Rows skipped    : " + result.skipped + "\n" +
+          "Weights sum to  : " + result.totalWeight.toFixed(2) + "%\n" +
+          "First holding   : " + (result.holdings[0] ? result.holdings[0].name : "(none)") + "\n"
+      );
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("FAILED - could not store the XACT fund.\n\n" + err.message + "\n");
     }
     return;
   }
