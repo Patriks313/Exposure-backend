@@ -127,7 +127,48 @@ async function getXactHoldings(productId) {
   return { holdings, holdingsCount: holdings.length, skipped, totalWeight, asOf: "" };
 }
 
+// --- Admin key (added 2026-10-28) ------------------------------
+// Routes that WRITE to the database or FETCH outside pages need the
+// secret key set as ADMIN_KEY on Render. Send it either as the
+// header  x-admin-key: <key>  (curl) or as  &key=<key>  in the URL.
+// Read-only routes the website uses (/fund-json, /list-funds,
+// /show-fund, /db-check) stay open. If ADMIN_KEY is not set, the
+// locked routes stay closed (fail safe).
+const crypto = require("crypto");
+const LOCKED_PREFIXES = [
+  "/store-", "/peek", "/resolve-tickers", "/find-fund",
+  "/fetch-ishares", "/fetch-xact", "/test-ishares",
+];
+function isLocked(url) {
+  const path = url.split("?")[0];
+  return LOCKED_PREFIXES.some((p) => path.startsWith(p));
+}
+function hasValidKey(req) {
+  const expected = process.env.ADMIN_KEY || "";
+  if (!expected) return false;
+  let given = req.headers["x-admin-key"] || "";
+  if (!given) {
+    try {
+      given = new URL(req.url, "http://localhost").searchParams.get("key") || "";
+    } catch (e) {
+      given = "";
+    }
+  }
+  const a = Buffer.from(String(given));
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 const server = http.createServer(async (req, res) => {
+  if (isLocked(req.url) && !hasValidKey(req)) {
+    res.writeHead(403, { "Content-Type": "text/plain" });
+    res.end(
+      "FORBIDDEN - this route needs the admin key.\n" +
+        "Send it as the header  x-admin-key: <key>  or add  &key=<key>  to the URL.\n"
+    );
+    return;
+  }
+
   // --- Database check: connect to Neon and create the tables ---
   // Visit this once to set up the two shared tables. Safe to
   // re-run any time; it never deletes anything.
