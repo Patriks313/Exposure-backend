@@ -21,7 +21,10 @@ const { Pool } = require("pg");
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // Neon requires SSL
+  // Neon requires SSL. rejectUnauthorized: true makes the backend check
+  // Neon's certificate, so nobody can impersonate the database
+  // (tightened 2026-10-28 after the eMudhra certificate advisory).
+  ssl: { rejectUnauthorized: true },
 });
 
 // --- Create the two tables if they aren't there yet ----------
